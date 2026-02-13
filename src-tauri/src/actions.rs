@@ -166,45 +166,26 @@ async fn post_process_transcription(settings: &AppSettings, transcription: &str)
     }
 }
 
-async fn maybe_convert_chinese_variant(
-    settings: &AppSettings,
-    transcription: &str,
-) -> Option<String> {
-    // Check if language is set to Simplified or Traditional Chinese
-    let is_simplified = settings.selected_language == "zh-Hans";
-    let is_traditional = settings.selected_language == "zh-Hant";
-
-    if !is_simplified && !is_traditional {
-        debug!("selected_language is not Simplified or Traditional Chinese; skipping translation");
-        return None;
-    }
-
-    debug!(
-        "Starting Chinese translation using OpenCC for language: {}",
-        settings.selected_language
-    );
-
-    // Use OpenCC to convert based on selected language
-    let config = if is_simplified {
-        // Convert Traditional Chinese to Simplified Chinese
-        BuiltinConfig::Tw2sp
-    } else {
-        // Convert Simplified Chinese to Traditional Chinese
-        BuiltinConfig::S2twp
-    };
-
-    match OpenCC::from_config(config) {
+fn maybe_convert_traditional_to_simplified(text: &str) -> Option<String> {
+    match OpenCC::from_config(BuiltinConfig::Tw2sp) {
         Ok(converter) => {
-            let converted = converter.convert(transcription);
+            let converted = converter.convert(text);
+            if converted == text {
+                return None;
+            }
+
             debug!(
-                "OpenCC translation completed. Input length: {}, Output length: {}",
-                transcription.len(),
+                "Applied Traditional->Simplified normalization. Input length: {}, Output length: {}",
+                text.len(),
                 converted.len()
             );
             Some(converted)
         }
         Err(e) => {
-            error!("Failed to initialize OpenCC converter: {}. Falling back to original transcription.", e);
+            error!(
+                "Failed to initialize OpenCC converter for Traditional->Simplified normalization: {}. Falling back to original transcription.",
+                e
+            );
             None
         }
     }
@@ -334,15 +315,7 @@ impl ShortcutAction for TranscribeAction {
                             let mut post_processed_text: Option<String> = None;
                             let mut post_process_prompt: Option<String> = None;
 
-                            // First, check if Chinese variant conversion is needed
-                            if let Some(converted_text) =
-                                maybe_convert_chinese_variant(&settings, &transcription).await
-                            {
-                                final_text = converted_text;
-                            }
-
-                            // Then apply LLM post-processing if this is the post-process hotkey
-                            // Uses final_text which may already have Chinese conversion applied
+                            // Apply LLM post-processing when this is the post-process hotkey
                             if post_process {
                                 show_processing_overlay(&ah);
                             }
@@ -365,8 +338,14 @@ impl ShortcutAction for TranscribeAction {
                                         post_process_prompt = Some(prompt.prompt.clone());
                                     }
                                 }
-                            } else if final_text != transcription {
-                                // Chinese conversion was applied but no LLM post-processing
+                            }
+
+                            // Normalize final output across all models:
+                            // if any Traditional Chinese appears, convert it to Simplified Chinese.
+                            if let Some(converted_text) =
+                                maybe_convert_traditional_to_simplified(&final_text)
+                            {
+                                final_text = converted_text;
                                 post_processed_text = Some(final_text.clone());
                             }
 
