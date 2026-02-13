@@ -1,5 +1,6 @@
 use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
 use crate::managers::model::{EngineType, ModelManager};
+use crate::managers::parakeet_ctc::{ParakeetCtcEngine, ParakeetCtcModelParams};
 use crate::settings::{get_settings, ModelUnloadTimeout};
 use anyhow::Result;
 use log::{debug, error, info, warn};
@@ -35,6 +36,7 @@ pub struct ModelStateEvent {
 enum LoadedEngine {
     Whisper(WhisperEngine),
     Parakeet(ParakeetEngine),
+    ParakeetCtc(ParakeetCtcEngine),
     Moonshine(MoonshineEngine),
     SenseVoice(SenseVoiceEngine),
 }
@@ -149,6 +151,7 @@ impl TranscriptionManager {
                 match loaded_engine {
                     LoadedEngine::Whisper(ref mut e) => e.unload_model(),
                     LoadedEngine::Parakeet(ref mut e) => e.unload_model(),
+                    LoadedEngine::ParakeetCtc(ref mut e) => e.unload_model(),
                     LoadedEngine::Moonshine(ref mut e) => e.unload_model(),
                     LoadedEngine::SenseVoice(ref mut e) => e.unload_model(),
                 }
@@ -266,6 +269,26 @@ impl TranscriptionManager {
                         anyhow::anyhow!(error_msg)
                     })?;
                 LoadedEngine::Parakeet(engine)
+            }
+            EngineType::ParakeetCtc => {
+                let mut engine = ParakeetCtcEngine::new();
+                engine
+                    .load_model_with_params(&model_path, ParakeetCtcModelParams::int8())
+                    .map_err(|e| {
+                        let error_msg =
+                            format!("Failed to load parakeet CTC model {}: {}", model_id, e);
+                        let _ = self.app_handle.emit(
+                            "model-state-changed",
+                            ModelStateEvent {
+                                event_type: "loading_failed".to_string(),
+                                model_id: Some(model_id.to_string()),
+                                model_name: Some(model_info.name.clone()),
+                                error: Some(error_msg.clone()),
+                            },
+                        );
+                        anyhow::anyhow!(error_msg)
+                    })?;
+                LoadedEngine::ParakeetCtc(engine)
             }
             EngineType::Moonshine => {
                 let mut engine = MoonshineEngine::new();
@@ -449,6 +472,9 @@ impl TranscriptionManager {
                         .transcribe_samples(audio, Some(params))
                         .map_err(|e| anyhow::anyhow!("Parakeet transcription failed: {}", e))?
                 }
+                LoadedEngine::ParakeetCtc(parakeet_ctc_engine) => parakeet_ctc_engine
+                    .transcribe_samples(audio, None)
+                    .map_err(|e| anyhow::anyhow!("Parakeet CTC transcription failed: {}", e))?,
                 LoadedEngine::Moonshine(moonshine_engine) => moonshine_engine
                     .transcribe_samples(audio, None)
                     .map_err(|e| anyhow::anyhow!("Moonshine transcription failed: {}", e))?,

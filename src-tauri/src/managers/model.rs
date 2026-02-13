@@ -20,6 +20,7 @@ use tauri::{AppHandle, Emitter, Manager};
 pub enum EngineType {
     Whisper,
     Parakeet,
+    ParakeetCtc,
     Moonshine,
     SenseVoice,
 }
@@ -325,6 +326,12 @@ impl ModelManager {
         if let Err(e) = Self::discover_custom_whisper_models(&models_dir, &mut available_models) {
             warn!("Failed to discover custom models: {}", e);
         }
+        // Auto-discover custom Parakeet CTC models (directory-based) in the models directory
+        if let Err(e) =
+            Self::discover_custom_parakeet_ctc_models(&models_dir, &mut available_models)
+        {
+            warn!("Failed to discover custom Parakeet CTC models: {}", e);
+        }
 
         let manager = Self {
             app_handle: app_handle.clone(),
@@ -594,6 +601,142 @@ impl ModelManager {
         }
 
         Ok(())
+    }
+
+    /// Discover custom Parakeet CTC models (directory-based) in the models directory.
+    ///
+    /// A directory is considered a Parakeet CTC model if:
+    /// - it contains at least one `.onnx` file
+    /// - it has a vocab file (`vocab.txt` or `*vocab.txt`)
+    /// - it is not the known TDT layout (`encoder-model*` + `decoder_joint-model*`)
+    fn discover_custom_parakeet_ctc_models(
+        models_dir: &Path,
+        available_models: &mut HashMap<String, ModelInfo>,
+    ) -> Result<()> {
+        if !models_dir.exists() {
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(models_dir)? {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!("Failed to read directory entry: {}", e);
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dirname = match path.file_name().and_then(|s| s.to_str()) {
+                Some(name) if !name.starts_with('.') => name.to_string(),
+                _ => continue,
+            };
+
+            // Skip pre-defined model directories (they already have explicit entries)
+            if available_models.values().any(|m| m.filename == dirname) {
+                continue;
+            }
+
+            if Self::is_parakeet_tdt_layout(&path) {
+                continue;
+            }
+
+            let mut has_onnx = false;
+            let mut has_vocab = false;
+            let mut total_size_bytes = 0u64;
+
+            for file_entry in fs::read_dir(&path)? {
+                let Ok(file_entry) = file_entry else {
+                    continue;
+                };
+                let file_path = file_entry.path();
+                if !file_path.is_file() {
+                    continue;
+                }
+
+                if let Ok(meta) = file_entry.metadata() {
+                    total_size_bytes = total_size_bytes.saturating_add(meta.len());
+                }
+
+                if file_path.extension().and_then(|e| e.to_str()) == Some("onnx") {
+                    has_onnx = true;
+                }
+                if let Some(name) = file_path.file_name().and_then(|s| s.to_str()) {
+                    if name == "vocab.txt" || name.ends_with("vocab.txt") {
+                        has_vocab = true;
+                    }
+                }
+            }
+
+            if !has_onnx || !has_vocab {
+                continue;
+            }
+
+            let model_id = dirname.clone();
+            if available_models.contains_key(&model_id) {
+                continue;
+            }
+
+            let size_mb = total_size_bytes / (1024 * 1024);
+            let display_name = format!("Parakeet CTC {}", Self::to_display_name(&dirname));
+
+            info!(
+                "Discovered custom Parakeet CTC model: {} ({}, {} MB)",
+                model_id, dirname, size_mb
+            );
+
+            available_models.insert(
+                model_id.clone(),
+                ModelInfo {
+                    id: model_id,
+                    name: display_name,
+                    description: "Custom Parakeet CTC model (manual install)".to_string(),
+                    filename: dirname,
+                    url: None,
+                    size_mb,
+                    is_downloaded: true,
+                    is_downloading: false,
+                    partial_size: 0,
+                    is_directory: true,
+                    engine_type: EngineType::ParakeetCtc,
+                    accuracy_score: 0.0,
+                    speed_score: 0.0,
+                    supports_translation: false,
+                    is_recommended: false,
+                    supported_languages: vec!["zh".to_string(), "zh-Hans".to_string()],
+                    is_custom: true,
+                },
+            );
+        }
+
+        Ok(())
+    }
+
+    fn is_parakeet_tdt_layout(model_dir: &Path) -> bool {
+        let encoder = model_dir.join("encoder-model.onnx");
+        let encoder_int8 = model_dir.join("encoder-model.int8.onnx");
+        let decoder = model_dir.join("decoder_joint-model.onnx");
+        let decoder_int8 = model_dir.join("decoder_joint-model.int8.onnx");
+        (encoder.exists() || encoder_int8.exists()) && (decoder.exists() || decoder_int8.exists())
+    }
+
+    fn to_display_name(model_id: &str) -> String {
+        model_id
+            .replace(['-', '_'], " ")
+            .split_whitespace()
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     pub async fn download_model(&self, model_id: &str) -> Result<()> {
