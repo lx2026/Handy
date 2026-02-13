@@ -126,11 +126,11 @@ impl ParakeetCtcEngine {
             .commit_from_file(&onnx_path)?;
 
         let has_audio_input = session
-            .inputs()
+            .inputs
             .iter()
             .any(|input| input.name == "audio_signal");
         let has_length_input = session
-            .inputs()
+            .inputs
             .iter()
             .any(|input| input.name == "length");
         if !has_audio_input || !has_length_input {
@@ -142,14 +142,14 @@ impl ParakeetCtcEngine {
         }
 
         let output_name = if session
-            .outputs()
+            .outputs
             .iter()
             .any(|output| output.name == "logprobs")
         {
             "logprobs".to_string()
         } else {
             session
-                .outputs()
+                .outputs
                 .first()
                 .map(|output| output.name.to_string())
                 .ok_or_else(|| anyhow!("Model has no outputs: {}", onnx_path.display()))?
@@ -196,7 +196,12 @@ impl ParakeetCtcEngine {
         }
 
         // CTC ONNX input shape: [B, 80, T]
-        let audio_signal = features.t().to_owned().insert_axis(Axis(0));
+        let audio_signal = features
+            .t()
+            .to_owned()
+            .insert_axis(Axis(0))
+            .as_standard_layout()
+            .to_owned();
         let length = Array1::from_vec(vec![features.nrows() as i64]);
 
         let inputs = inputs![
